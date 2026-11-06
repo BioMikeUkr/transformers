@@ -1491,6 +1491,8 @@
         title: Nougat
       - local: model_doc/omdet-turbo
         title: OmDet-Turbo
+      - local: model_doc/omni_deberta
+        title: OmniDeBERTa
       - local: model_doc/oneformer
         title: OneFormer
       - local: model_doc/ovis2

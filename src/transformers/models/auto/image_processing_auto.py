@@ -56,6 +56,7 @@ _LANCZOS_IMAGE_PROCESSORS = [
     "ChameleonImageProcessor",
     "FlavaImageProcessor",
     "Idefics3ImageProcessor",
+    "OmniDebertaImageProcessor",
     "SmolVLMImageProcessor",
 ]
 
