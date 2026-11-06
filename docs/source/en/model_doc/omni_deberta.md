@@ -68,7 +68,8 @@ A sample may hold several media and text: without placeholders its images, then 
 **Sentence Transformers**
 
 The checkpoints load in [Sentence Transformers](https://sbert.net) (>= 6.1) without remote code: the embedding is
-`pooler_output` for every modality, and the prompts the model was trained with are stored by task.
+`pooler_output` for every modality, and the prompts the model was trained with are stored by task. As in training,
+a prompt applies to inputs with text: images and clips alone are embedded without it.
 
 ```python
 from PIL import Image

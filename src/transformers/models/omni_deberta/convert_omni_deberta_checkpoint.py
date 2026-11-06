@@ -114,12 +114,18 @@ TASK_PROMPTS = {
     "Summarization": "task: sentence similarity | query: ",
 }
 # Renders a conversation (SentenceTransformers' "message" inputs: several modalities in one embedding) as text with
-# media placeholders, in content order: system text (the prompt), then every part.
+# media placeholders, in content order. The system text (the task prompt) is kept only when the conversation has text:
+# images and clips were embedded without prompts in training, as by the teacher.
 CHAT_TEMPLATE = (
-    "{%- for msg in messages if msg.get('role') == 'system' -%}"
+    "{%- set ns = namespace(has_text=false) -%}"
+    "{%- for msg in messages if msg.get('role') != 'system' -%}"
+    "{%- if msg.get('content') is string -%}{%- if msg['content'] -%}{%- set ns.has_text = true -%}{%- endif -%}"
+    "{%- else -%}{%- for item in msg['content'] if item.get('type') == 'text' and item.get('text') -%}"
+    "{%- set ns.has_text = true -%}{%- endfor -%}{%- endif -%}{%- endfor -%}"
+    "{%- if ns.has_text -%}{%- for msg in messages if msg.get('role') == 'system' -%}"
     "{%- if msg.get('content') is string -%}{{ msg['content'] }}"
     "{%- else -%}{%- for item in msg['content'] if item.get('type') == 'text' -%}{{ item['text'] }}{%- endfor -%}"
-    "{%- endif -%}{%- endfor -%}"
+    "{%- endif -%}{%- endfor -%}{%- endif -%}"
     "{%- for msg in messages if msg.get('role') != 'system' -%}"
     "{%- if msg.get('content') is string -%}{{ msg['content'] }}"
     "{%- else -%}"
