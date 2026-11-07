@@ -26,7 +26,7 @@ from ...utils import auto_docstring
 MODALITIES = ("text", "image", "audio")
 
 
-@auto_docstring(checkpoint="knowledgator/OmniDeberta-300M-A150M")
+@auto_docstring(checkpoint="knowledgator/OmniDeBERTa-300M-A115M-Base")
 @strict
 class OmniDebertaConfig(PreTrainedConfig):
     r"""

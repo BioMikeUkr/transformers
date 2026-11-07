@@ -23,7 +23,20 @@ disentangled relative attention reads text, images and audio in a single sequenc
 `[CLS] [EMBED] [IMG] patches [/IMG] [AUD] audio [/AUD] text [SEP]`. Images are cut into 16x16 patches (one position
 each, with 2-D relative positions in some layers), audio goes through a small convolutional stem (one position per
 40 ms of log-mel frames). Every layer has one feed-forward expert per modality, chosen per token by a fixed rule, so
-`OmniDeberta-300M-A150M` has 300M parameters of which 150M are active for a token.
+`OmniDeBERTa-300M-A115M` has 300M parameters of which 115M are active for a token (without the 32.8M word-embedding
+table).
+
+Checkpoints:
+
+- [knowledgator/OmniDeBERTa-300M-A115M-Base](https://huggingface.co/knowledgator/OmniDeBERTa-300M-A115M-Base): the
+  general model with all its heads (embeddings, masked word prediction, generation, referring segmentation);
+- [knowledgator/OmniDeBERTa-300M-A115M-Embedder](https://huggingface.co/knowledgator/OmniDeBERTa-300M-A115M-Embedder):
+  the Base fine-tuned for embeddings, encoder only;
+- [knowledgator/OmniDeBERTa-170M-A60M-Embedder](https://huggingface.co/knowledgator/OmniDeBERTa-170M-A60M-Embedder)
+  and [knowledgator/OmniDeBERTa-100M-A30M-Embedder](https://huggingface.co/knowledgator/OmniDeBERTa-100M-A30M-Embedder):
+  8- and 4-layer embedders distilled from it;
+- [knowledgator/OmniDeBERTa-300M-A115M-Discriminator](https://huggingface.co/knowledgator/OmniDeBERTa-300M-A115M-Discriminator):
+  replaced token detection, ELECTRA-style, from the Base.
 
 The same model gives:
 
@@ -47,7 +60,7 @@ from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
 
-model_id = "knowledgator/OmniDeberta-300M-A150M"
+model_id = "knowledgator/OmniDeBERTa-300M-A115M-Embedder"
 processor = AutoProcessor.from_pretrained(model_id)
 model = AutoModel.from_pretrained(model_id, device_map="auto")
 
@@ -75,13 +88,16 @@ a prompt applies to inputs with text: images and clips alone are embedded withou
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("knowledgator/OmniDeberta-300M-A150M")
+model = SentenceTransformer("knowledgator/OmniDeBERTa-300M-A115M-Embedder")
 image = Image.new("RGB", (320, 240), "red")
 
 queries = model.encode(["a red square"], prompt_name="query")
 documents = model.encode([image, {"image": image, "text": "a red square on a white page"}])
 print(model.similarity(queries, documents))
 ```
+
+Sentence Transformers infers the modality of a string from its content, so text that looks like a path, a URL or base64
+(code, for example) can be read as an image or audio: pass such text as `{"text": ...}`.
 
 **Image descriptions and speech transcripts**
 
@@ -95,7 +111,7 @@ from PIL import Image
 from transformers import AutoModelForMaskedLM, AutoProcessor
 
 
-model_id = "knowledgator/OmniDeberta-300M-A150M"
+model_id = "knowledgator/OmniDeBERTa-300M-A115M-Base"
 processor = AutoProcessor.from_pretrained(model_id)
 model = AutoModelForMaskedLM.from_pretrained(model_id, device_map="auto")
 
@@ -123,8 +139,10 @@ print(processor.decode(logits[0, masked].argmax()))
 
 - A model for some modalities only loads from any checkpoint: `AutoModel.from_pretrained(model_id, modalities=["text"])`
   (in Sentence Transformers `config_kwargs={"modalities": ["text"]}`) builds no image or audio stem and no image or audio
-  experts, and skips their weights: 148M parameters instead of 300M for `OmniDeberta-300M-A150M`, the same text
+  experts, and skips their weights: 148M parameters instead of 300M for `OmniDeBERTa-300M-A115M`, the same text
   embeddings.
+- Inputs are truncated to 8192 tokens, the trained length; the model does not extrapolate past it. The limit can be
+  raised with `AutoProcessor.from_pretrained(model_id, max_length=...)` (`model.max_seq_length` in Sentence Transformers).
 - The image processor resizes with LANCZOS, as in training. torchvision supports it from 0.27 on; with older versions
   [`AutoImageProcessor`] picks the PIL backend ([`OmniDebertaImageProcessorPil`]).
 - The relative position terms are an additive attention bias: the model supports the `eager`, `sdpa` and `flex_attention`

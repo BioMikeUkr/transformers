@@ -18,9 +18,11 @@ its ELECTRA wrapper) to the transformers format.
     python src/transformers/models/omni_deberta/convert_omni_deberta_checkpoint.py --input_dir SOURCE --output_dir OUTPUT
 
 The output holds the weights of every head of the source (word prediction, referring segmentation, replaced token
-detection); every model class loads the ones it uses. The processor is saved next to them, and the files that make the
-output a SentenceTransformers model (`modules.json`, `sentence_bert_config.json`, `config_sentence_transformers.json`):
-its embedding is `pooler_output` for every modality.
+detection); every model class loads the ones it uses. The processor is saved next to them. A model with the word
+prediction head also gets its generation config, and the files that make it a SentenceTransformers model
+(`modules.json`, `sentence_bert_config.json`, `config_sentence_transformers.json`): its embedding is `pooler_output`
+for every modality. With `--encoder_only` (an embedding model) the task heads are left out and the output is an
+`OmniDebertaModel` with the SentenceTransformers files.
 """
 
 import argparse
@@ -184,12 +186,15 @@ def convert_tokenizer(input_dir: str):
 
 def check_weights(output_dir: str, state: dict):
     """Every converted weight is used by a head class and none is missing: catches a wrong rename."""
-    heads = [OmniDebertaForMaskedLM]
+    heads = [OmniDebertaForMaskedLM] if any(key.startswith("lm_head.") for key in state) else []
     if any(key.startswith("segment_") for key in state):
         heads.append(OmniDebertaForImageSegmentation)
     if any(key.startswith("rtd_head.") for key in state):
         heads.append(OmniDebertaForReplacedTokenDetection)
-    base = OmniDebertaModel.from_pretrained(output_dir)
+    pooler = any(key.startswith("model.pooler.") for key in state)
+    base, info = OmniDebertaModel.from_pretrained(output_dir, add_pooling_layer=pooler, output_loading_info=True)
+    if info["missing_keys"] or info["mismatched_keys"]:
+        raise ValueError(f"OmniDebertaModel: missing {info['missing_keys']}, mismatched {info['mismatched_keys']}")
     used = {f"model.{key}" for key in base.state_dict()}
     for head in heads:
         model, info = head.from_pretrained(output_dir, output_loading_info=True)
@@ -201,27 +206,35 @@ def check_weights(output_dir: str, state: dict):
         raise ValueError(f"Converted weights no model class uses: {sorted(unused)[:10]}")
 
 
-def convert(input_dir: str, output_dir: str):
+def convert(input_dir: str, output_dir: str, encoder_only: bool = False, tokenizer_dir: str | None = None):
     os.makedirs(output_dir, exist_ok=True)
     config = convert_config(input_dir)
     state = convert_state_dict(load_file(os.path.join(input_dir, "model.safetensors")))
-    if "rtd_head.classifier.weight" in state:
+    if encoder_only:
+        state = {key: value for key, value in state.items() if key.startswith("model.")}
+        config.architectures = ["OmniDebertaModel"]
+    elif "rtd_head.classifier.weight" in state:
+        # the discriminator's embedding projection is the start point's, untrained for its encoder: left out
+        state = {key: value for key, value in state.items() if not key.startswith("model.pooler.")}
         config.architectures = ["OmniDebertaForReplacedTokenDetection"]
+    has_lm_head = any(key.startswith("lm_head.") for key in state)
     config.save_pretrained(output_dir)
     save_file(state, os.path.join(output_dir, "model.safetensors"), metadata={"format": "pt"})
-    OmniDebertaGenerationConfig().save_pretrained(output_dir)
+    if has_lm_head:
+        OmniDebertaGenerationConfig().save_pretrained(output_dir)
     check_weights(output_dir, state)
 
     processor = OmniDebertaProcessor(
         image_processor=OmniDebertaImageProcessor(size={"height": config.image_size, "width": config.image_size}),
         feature_extractor=OmniDebertaFeatureExtractor(feature_size=config.num_mel_bins),
-        tokenizer=convert_tokenizer(input_dir),
+        tokenizer=convert_tokenizer(tokenizer_dir or input_dir),
         patch_size=config.patch_size,
         max_length=config.max_position_embeddings,
         chat_template=CHAT_TEMPLATE,
     )
     processor.save_pretrained(output_dir)
-    save_sentence_transformer(output_dir)
+    if has_lm_head or encoder_only:  # the discriminator's embedding was not trained
+        save_sentence_transformer(output_dir)
 
 
 def save_sentence_transformer(output_dir: str):
@@ -261,5 +274,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input_dir", required=True, help="Directory of the training checkpoint.")
     parser.add_argument("--output_dir", required=True, help="Directory to write the converted model to.")
+    parser.add_argument(
+        "--encoder_only", action="store_true", help="Keep only the encoder (an embedding model), no task heads."
+    )
+    parser.add_argument(
+        "--tokenizer_dir", help="Directory of the tokenizer, when the checkpoint has none (default: `--input_dir`)."
+    )
     args = parser.parse_args()
-    convert(args.input_dir, args.output_dir)
+    convert(args.input_dir, args.output_dir, encoder_only=args.encoder_only, tokenizer_dir=args.tokenizer_dir)

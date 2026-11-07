@@ -58,7 +58,7 @@ IMAGE = 1
 AUDIO = 2
 
 
-@auto_docstring(checkpoint="knowledgator/OmniDeberta-300M-A150M")
+@auto_docstring(checkpoint="knowledgator/OmniDeBERTa-300M-A115M-Base")
 @strict
 class OmniDebertaConfig(PreTrainedConfig):
     r"""
