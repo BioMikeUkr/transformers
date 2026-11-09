@@ -322,39 +322,44 @@ class OmniDebertaSelfAttention(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        relative_pos: torch.Tensor,
+        relative_pos: tuple[torch.Tensor, torch.Tensor],
         rel_embeddings: torch.Tensor,
     ) -> torch.Tensor | None:
-        """The c2p and p2c terms, divided by the scale: `(batch, heads, length, length)`, or None."""
+        """
+        The c2p and p2c terms, divided by the scale: `(batch, heads, length, length)`, or None. `relative_pos` holds
+        the gather indices of both terms (`OmniDebertaEncoder.position_index`), shared by all layers.
+        """
         if not self.pos_att_type:
             return None
         span = self.pos_ebd_size
         rel_embeddings = self.pos_dropout(rel_embeddings[: 2 * span])[None]
-        relative_pos = relative_pos[:, None].expand(-1, self.num_attention_heads, -1, -1)
-        bias = 0
+        c2p_index, p2c_index = relative_pos
+        shape = (query.shape[0], self.num_attention_heads, query.shape[-2], key.shape[-2])
+        bias = None
+        # The scale is applied to the `(2 * span)`-row position tables before the gather, not to the
+        # `(length, length)` bias, and the indices are views expanded over batch and heads (no copies).
         if "c2p" in self.pos_att_type:
             pos_key = self.split_heads((self.key_proj if self.share_att_key else self.pos_key_proj)(rel_embeddings))
             # Trained c2p terms hold a large constant per query (the query against the mean position key); the
             # softmax ignores it, but in half precision it swallows the part that differs between keys. Centering the
             # position keys removes it exactly.
             pos_key = pos_key - pos_key.mean(-2, keepdim=True)
-            c2p = torch.matmul(query, pos_key.transpose(-1, -2))
-            index = torch.clamp(relative_pos + span, 0, 2 * span - 1).expand(c2p.shape[0], -1, -1, -1)
-            bias = bias + torch.gather(c2p, -1, index)
+            c2p = torch.matmul(query, pos_key.transpose(-1, -2) / self.scale)
+            bias = torch.gather(c2p, -1, c2p_index.expand(shape))
         if "p2c" in self.pos_att_type:
             pos_query = self.split_heads(
                 (self.query_proj if self.share_att_key else self.pos_query_proj)(rel_embeddings)
             )
-            p2c = torch.matmul(key, pos_query.transpose(-1, -2))
-            index = torch.clamp(-relative_pos + span, 0, 2 * span - 1).expand(p2c.shape[0], -1, -1, -1)
-            bias = bias + torch.gather(p2c, -1, index).transpose(-1, -2)
-        return bias / self.scale
+            p2c = torch.matmul(key, pos_query.transpose(-1, -2) / self.scale)
+            p2c = torch.gather(p2c, -1, p2c_index.expand(shape)).transpose(-1, -2)
+            bias = p2c if bias is None else bias + p2c
+        return bias
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        relative_pos: torch.Tensor | None = None,
+        relative_pos: tuple[torch.Tensor, torch.Tensor] | None = None,
         rel_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -407,7 +412,7 @@ class OmniDebertaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        relative_pos: torch.Tensor | None = None,
+        relative_pos: tuple[torch.Tensor, torch.Tensor] | None = None,
         rel_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -477,7 +482,7 @@ class OmniDebertaLayer(GradientCheckpointingLayer):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        relative_pos: torch.Tensor | None = None,
+        relative_pos: tuple[torch.Tensor, torch.Tensor] | None = None,
         rel_embeddings: torch.Tensor | None = None,
         routing: OmniDebertaExpertRouting | None = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -548,6 +553,18 @@ class OmniDebertaEncoder(nn.Module):
             rel_embeddings = self.LayerNorm(rel_embeddings)
         return rel_embeddings
 
+    def position_index(self, relative_pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        `relative_pos` `(batch, length, length)` -> the gather indices of the c2p and p2c terms, each
+        `(batch, 1, length, length)`. Built once per forward and shared by all layers of that kind.
+        """
+        span = self.position_buckets if self.position_buckets > 0 else self.max_relative_positions
+        relative_pos = relative_pos[:, None]
+        return (
+            torch.clamp(relative_pos + span, 0, 2 * span - 1),
+            torch.clamp(-relative_pos + span, 0, 2 * span - 1),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -564,9 +581,13 @@ class OmniDebertaEncoder(nn.Module):
         sequential = grid = None
         if rel_embeddings is not None:
             order = torch.arange(hidden_states.shape[1], device=hidden_states.device)[None]
-            sequential = build_relative_position(order, self.position_buckets, self.max_relative_positions)
+            sequential = self.position_index(
+                build_relative_position(order, self.position_buckets, self.max_relative_positions)
+            )
             if positions_2d is not None:
-                grid = build_relative_position(positions_2d, self.position_buckets, self.max_relative_positions)
+                grid = self.position_index(
+                    build_relative_position(positions_2d, self.position_buckets, self.max_relative_positions)
+                )
 
         for index, layer in enumerate(self.layer, start=1):
             relative_pos = grid if grid is not None and index in self.relative_2d_layers else sequential
